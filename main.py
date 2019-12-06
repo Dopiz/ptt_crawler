@@ -1,209 +1,57 @@
-import json
-import re
 import threading
 
-import requests
-import slack
-import urllib3
-from bs4 import BeautifulSoup
-from flask import Flask
-from linebot import LineBotApi
-from linebot.models import (BoxComponent, BubbleContainer, ButtonComponent,
-                            CarouselContainer, FlexSendMessage, ImageComponent,
-                            MessageAction, SeparatorComponent, SpacerComponent,
-                            TextComponent, URIAction)
-
-from crawler import PttCrawler
-from gsc import GoogleSheetClient
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-app = Flask(__name__)
-sheet_name = "Testing"
+from options import line_info, slack_info, keywords, board_list, page
+from bot.line_bot import LineBot
+from bot.ptt_crawler import PttCrawler
+from bot.slack_bot import SlackBot
+from history.history import History
 
 
-class SlackBot(object):
+class Crawler(object):
 
-    def __init__(self, token):
-        self.slack_bot_api = slack.WebClient(token)
-
-    def notify(self, channels, article):
-
-        content = f"{article['title']}\n{article['link']}"
-
-        for channel in channels:
-            self.slack_bot_api.chat_postMessage(
-                channel=channel, text=content)
-
-
-class LineBot(object):
-
-    def __init__(self, token):
-        self.line_bot_api = LineBotApi(token)
-
-    def flex_message_builder(self, articles):
-
-        contents = list()
-
-        for article in articles:
-            # Line Flex Message
-            bubble = BubbleContainer(direction='ltr',
-                                     header=BoxComponent(
-                                         layout='vertical',
-                                         contents=[
-                                             TextComponent(text="➤ 批踢踢評論來囉！",
-                                                           weight='bold', size='md', color='#E00512')
-                                         ]
-                                     ),
-                                     hero=ImageComponent(
-                                         url='https://d.rimg.com.tw/s2/b/65/c8/21842830853576_926_m.png',
-                                         size='full',
-                                         aspect_ratio='5:3',
-                                         aspect_mode='cover'
-                                     ),
-                                     body=BoxComponent(
-                                         layout='vertical',
-                                         contents=[
-                                             TextComponent(
-                                                 text=article['title'], wrap=True, weight='bold', size='lg'),
-                                             BoxComponent(
-                                                 layout='vertical',
-                                                 margin='lg',
-                                                 spacing='sm',
-                                                 contents=[
-                                                     BoxComponent(layout='baseline', spacing='sm',
-                                                                  contents=[
-                                                                      TextComponent(
-                                                                          text='Board', color='#aaaaaa', size='sm', flex=1),
-                                                                      TextComponent(
-                                                                          text=article['board'], wrap=True, color='#666666', size='sm', flex=0)
-                                                                  ],
-                                                                  ),
-                                                     BoxComponent(layout='baseline', spacing='sm',
-                                                                  contents=[
-                                                                      TextComponent(
-                                                                          text='Author', color='#aaaaaa', size='sm', flex=1),
-                                                                      TextComponent(
-                                                                          text=article['author'], wrap=False, color='#666666', size='sm', flex=0),
-                                                                  ],
-                                                                  ),
-                                                     BoxComponent(layout='baseline', spacing='sm',
-                                                                  contents=[
-                                                                      TextComponent(
-                                                                          text='Date', color='#aaaaaa', size='sm', flex=1),
-                                                                      TextComponent(
-                                                                          text=article['date'], wrap=True, color='#666666', size='sm', flex=0),
-                                                                  ],
-                                                                  ),
-                                                     SeparatorComponent(),
-                                                     BoxComponent(layout='baseline', spacing='sm',
-                                                                  contents=[
-                                                                      TextComponent(
-                                                                          text=article['content'], wrap=True, color='#666666', size='sm', flex=1),
-                                                                  ],
-                                                                  ),
-                                                 ],
-                                             )
-                                         ],
-                                     ),
-                                     footer=BoxComponent(
-                                         layout='vertical',
-                                         spacing='sm',
-                                         contents=[
-                                             SpacerComponent(size='sm'),
-                                             ButtonComponent(
-                                                 style='primary',
-                                                 height='sm',
-                                                 action=MessageAction(
-                                                     label='罵個幹！', text='幹！'),
-                                             ),
-                                             # SeparatorComponent(),
-                                             ButtonComponent(
-                                                 style='secondary',
-                                                 height='sm',
-                                                 action=URIAction(
-                                                     label='來去看一下～', uri=article['link'])
-                                             )
-                                         ]
-                                     ),
-                                     )
-            contents.append(bubble)
-
-        return contents
-
-    def notify(self, channels, articles):
-
-        for idx in range(0, len(articles), 10):
-            contents = self.flex_message_builder(articles[idx:idx + 10])
-
-            message = FlexSendMessage(
-                alt_text="➤ 批踢踢評論來囉！", contents=CarouselContainer(contents=contents))
-
-            for channel in channels:
-                self.line_bot_api.push_message(to=channel, messages=message)
-
-
-class Bot:
-
-    def __init__(self):
-        self.gsc = GoogleSheetClient()
-        self.history_list = list()
-
-    def notify(self, articles):
-        token = self.gsc.load_token()
-        line_bot = LineBot(token['line_token'])
-        slack_bot = SlackBot(token['slack_token'])
-        line_channels, slack_channels = self.gsc.load_notify_list(sheet_name)
-        new_articles = list()
-
-        line_bot.notify(line_channels, articles)
-
-        for article in articles:
-            try:
-                slack_bot.notify(slack_channels, article)
-                new_articles.insert(0, article['id'])
-            except Exception as e:
-                print(f"Slack notify error: [{article['id']}] - {e}")
-
-        self.crawler.save_history(self.board_name, new_articles)
-
-    def ptt_crawling(self, board_name, page, keywords):
-
+    def __init__(self, board_name, keywords):
         self.board_name = board_name
-        self.crawler = PttCrawler()
-        articles = self.crawler.crawling(
-            board_name=board_name, page=page, keywords=keywords)
+        self.keywords = keywords
+        self.new_articles = None
+        self.history = History(self.board_name)
 
-        if articles:
-            self.notify(articles)
+    def notify(self, token, channel, platform):
+
+        if channel is None:
+            return
+
+        if platform == "Line":
+            bot = LineBot(token)
+        elif platform == "Slack":
+            bot = SlackBot(token)
+
+        if bot.notify(channel, self.new_articles):
+            self.history.save()
+
+    def crawling(self, page):
+        crawler = PttCrawler(self.history.history_list, self.board_name, self.keywords)
+        self.new_articles = crawler.crawling(page)
+        new_articles_id = [article['id'] for article in self.new_articles]
+        self.history.history_list = new_articles_id + self.history.history_list
 
 
-def crawler(board_name, page, keywords):
-    Bot().ptt_crawling(board_name, page, keywords)
+def worker(board_name, keywords, page=1, line=None, slack=None):
+    crawler = Crawler(board_name, keywords)
+    crawler.crawling(page)
     print(f'[ {board_name} ] 爬起來～爬起來～(づ｡◕‿‿◕｡)づ')
+    crawler.notify(line['token'], line['channel'], "Line")
+    crawler.notify(slack['token'], slack['channel'], "Slack")
 
 
-@app.route('/CrAwlInG')
-def crawling():
-
-    gsc = GoogleSheetClient()
-    board_list = gsc.load_ptt_board(sheet_name)
-    keywords = gsc.load_keyword(sheet_name)
-    page = 2
+if __name__ == '__main__':
 
     threads = list()
 
     for board_name in board_list:
-        thread = threading.Thread(
-            target=crawler, args=(board_name, page, keywords,))
+        thread = threading.Thread(target=worker,
+                                  args=(board_name, keywords, page, line_info, slack_info, ))
         threads.append(thread)
         thread.start()
 
     for thread in threads:
         thread.join()
-
-    return "Ptt Crawling Done ."
-
-
-if __name__ == '__main__':
-    crawling()
