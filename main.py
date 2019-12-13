@@ -25,8 +25,8 @@ class Crawler(object):
         elif platform == "Slack":
             bot = SlackBot(token)
 
-        if bot.notify(channel, self.new_articles):
-            self.history.save()
+        bot.notify(channel, self.new_articles)
+        self.history.save()
 
     def crawling(self, page):
         crawler = PttCrawler(self.history.history_list, self.board_name, self.keywords)
