@@ -1,57 +1,59 @@
+import os
 import threading
 
-from options import line_info, slack_info, keywords, board_list, page
-from bot.line_bot import LineBot
-from bot.ptt_crawler import PttCrawler
-from bot.slack_bot import SlackBot
+import click
+
+from bot.crawler import PttCrawler
+from bot.notify_bot import LineNotify, SlackNotify
 from history.history import History
 
-
-class Crawler(object):
-
-    def __init__(self, board_name, keywords):
-        self.board_name = board_name
-        self.keywords = keywords
-        self.new_articles = None
-        self.history = History(self.board_name)
-
-    def notify(self, token, channel, platform):
-
-        if channel is None:
-            return
-
-        if platform == "Line":
-            bot = LineBot(token)
-        elif platform == "Slack":
-            bot = SlackBot(token)
-
-        bot.notify(channel, self.new_articles)
-        self.history.save()
-
-    def crawling(self, page):
-        crawler = PttCrawler(self.history.history_list, self.board_name, self.keywords)
-        self.new_articles = crawler.crawling(page)
-        new_articles_id = [article['id'] for article in self.new_articles]
-        self.history.history_list = new_articles_id + self.history.history_list
+SLACK_TOKEN = os.environ.get('SLACK_TOKEN')
+LINE_TOKEN = os.environ.get('LINE_TOKEN')
+LINE_PER_MSG = 10
 
 
-def worker(board_name, keywords, page=1, line=None, slack=None):
-    crawler = Crawler(board_name, keywords)
-    crawler.crawling(page)
-    print(f'[ {board_name} ] 爬起來～爬起來～(づ｡◕‿‿◕｡)づ')
-    crawler.notify(line['token'], line['channel'], "Line")
-    crawler.notify(slack['token'], slack['channel'], "Slack")
+def worker(board_name: str, keywords: list, pages: int = 1, slack_channel: list = [], line_channel: list = []):
+    history = History(file_name=board_name)
+    crawler = PttCrawler(board_name, keywords, ignore_list=history.history)
+    articles = []
+
+    slack_bot = SlackNotify(SLACK_TOKEN)
+    for article in crawler.crawling(pages):
+        slack_bot.notify(slack_channel, article)
+        history.insert(article.id)
+        # articles.append(article)
+
+    # line_bot = LineNotify(LINE_TOKEN)
+    # for idx in range(len(articles), LINE_PER_MSG):
+    #     line_bot.notify(line_channel, articles[idx:idx + LINE_PER_MSG])
+
+    history.save()
 
 
-if __name__ == '__main__':
+@click.command()
+@click.option('-b', '--board', required=True, help='PTT Board Name List (comma-separated)')
+@click.option('-k', '--keywords', required=True, help='Keywords List (comma-separated)')
+@click.option('-p', '--pages', default=1, help='Page')
+@click.option('-sc', '--slack-channel', default="", help='Notify Slack Channel List (comma-separated)')
+@click.option('-lc', '--line-channel', default="", help='Notify Line Channel List (comma-separated)')
+def crawler(board, keywords, pages, slack_channel, line_channel):
 
-    threads = list()
+    board = set(board.split(","))
+    keywords = set(keywords.split(","))
+    slack_channel = set(slack_channel.split(","))
+    line_channel = set(line_channel.split(","))
 
-    for board_name in board_list:
-        thread = threading.Thread(target=worker,
-                                  args=(board_name, keywords, page, line_info, slack_info, ))
+    threads = []
+    for board_name in board:
+        thread = threading.Thread(
+            target=worker,
+            args=(board_name, keywords, pages, slack_channel, line_channel,)
+        )
         threads.append(thread)
         thread.start()
 
     for thread in threads:
         thread.join()
+
+
+crawler()

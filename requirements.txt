@@ -2,3 +2,4 @@ requests
 beautifulsoup4
 line-bot-sdk
 slackclient
+click
